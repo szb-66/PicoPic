@@ -1,0 +1,8 @@
+node_modules/
+dist/
+src-tauri/target/
+*.log
+.DS_Store
+.smoke-input/
+incident-affected-files.csv
+PicoPic-portable-*.zip
