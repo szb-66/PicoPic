@@ -1,5 +1,5 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { createBrowserBackend } from "./backend";
 import { demoJobs } from "./demoData";
@@ -9,6 +9,10 @@ describe("PicoPic interface", () => {
     render(<App />);
     expect(await screen.findByText("将图片或文件夹拖到这里")).toBeInTheDocument();
     expect(screen.getByText(/完全离线处理/)).toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "选择图片" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("button", { name: "选择文件夹" })).not.toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "添加图片" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "文件夹" })).toBeInTheDocument();
   });
 
   it("opens all three preference sections and cancels draft changes", async () => {
@@ -33,5 +37,32 @@ describe("PicoPic interface", () => {
     expect(await screen.findByText("landing-hero.png")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "清理" }));
     await waitFor(() => expect(screen.queryByText("landing-hero.png")).not.toBeInTheDocument());
+  });
+
+  it("exposes working desktop window controls without a dead more-options button", async () => {
+    const windowActions = {
+      minimize: vi.fn().mockResolvedValue(undefined),
+      toggleMaximize: vi.fn().mockResolvedValue(undefined),
+      close: vi.fn().mockResolvedValue(undefined),
+    };
+    render(<App windowActions={windowActions} />);
+    await screen.findByText("将图片或文件夹拖到这里");
+
+    fireEvent.click(screen.getByRole("button", { name: "最小化" }));
+    fireEvent.click(screen.getByRole("button", { name: "最大化或还原" }));
+    fireEvent.click(screen.getByRole("button", { name: "关闭" }));
+
+    expect(windowActions.minimize).toHaveBeenCalledOnce();
+    expect(windowActions.toggleMaximize).toHaveBeenCalledOnce();
+    expect(windowActions.close).toHaveBeenCalledOnce();
+    expect(screen.queryByRole("button", { name: "更多选项" })).not.toBeInTheDocument();
+  });
+
+  it("marks the custom title bar drag region and centers both command groups", async () => {
+    const { container } = render(<App />);
+    await screen.findByText("将图片或文件夹拖到这里");
+
+    expect(container.querySelector(".title-drag-region")).toHaveAttribute("data-tauri-drag-region");
+    expect(container.querySelectorAll(".command-bar > .command-group")).toHaveLength(2);
   });
 });

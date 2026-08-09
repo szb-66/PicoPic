@@ -24,5 +24,5 @@
 - [x] 4.1 Add and pass frontend tests for queue presentation, summaries, settings transactions, validation, and backend adapter behavior
 - [x] 4.2 Add and pass Rust unit/integration tests for scanning, formats, settings, compression, cancellation, safe replacement, and source preservation
 - [x] 4.3 Run the frontend and Tauri development checks, manually smoke-test native drag/drop and JPEG/PNG/WebP replacement, and document any environment limitations
-- [x] 4.4 Capture matching reference and implementation states, iterate on P0/P1/P2 visual differences, and create a passing project-root design-qa.md
+- [x] 4.4 Capture matching reference and implementation states, iterate on P0/P1/P2 visual differences, and create a passing `docs/qa/design-qa.md` report
 - [x] 4.5 Run strict OpenSpec validation and verify implementation coverage against every requirement and scenario

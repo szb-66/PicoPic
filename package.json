@@ -1,7 +1,14 @@
 {
   "name": "picopic",
-  "version": "0.0.0",
+  "version": "0.1.0",
+  "description": "Offline image compression for Windows",
   "private": true,
+  "homepage": "https://github.com/szb-66/PicoPic#readme",
+  "bugs": "https://github.com/szb-66/PicoPic/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/szb-66/PicoPic.git"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",

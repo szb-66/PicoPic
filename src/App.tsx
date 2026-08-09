@@ -8,7 +8,6 @@ import {
   DismissCircle20Filled,
   DocumentImage20Regular,
   FolderOpen20Regular,
-  MoreHorizontal20Regular,
   Settings20Regular,
   SubtractCircle20Regular,
 } from "@fluentui/react-icons";
@@ -24,6 +23,7 @@ import {
   type OptimizationLevel,
   type QueueSummary,
 } from "./types";
+import { desktopWindowActions, type WindowActions } from "./windowActions";
 
 const statusCopy: Record<JobStatus, string> = {
   queued: "等待中",
@@ -50,16 +50,12 @@ function StatusIcon({ status }: { status: JobStatus }) {
   return <span className="queued-dot" aria-label="等待中" />;
 }
 
-function DropEmpty({ active, onAddFiles, onAddFolder }: { active: boolean; onAddFiles: () => void; onAddFolder: () => void }) {
+function DropEmpty({ active }: { active: boolean }) {
   return (
     <section className={`drop-empty ${active ? "active" : ""}`} aria-label="图片拖放区域">
       <div className="drop-emblem"><DocumentImage20Regular /></div>
       <h1>{active ? "松开即可开始压缩" : "将图片或文件夹拖到这里"}</h1>
       <p>支持 JPEG、PNG、WebP · 完全离线处理 · 仅在变小时替换</p>
-      <div className="empty-actions">
-        <button className="primary" onClick={onAddFiles}><Add20Regular />选择图片</button>
-        <button onClick={onAddFolder}><FolderOpen20Regular />选择文件夹</button>
-      </div>
     </section>
   );
 }
@@ -144,7 +140,7 @@ function SettingsDialog({ settings, onClose, onSave }: { settings: AppSettings; 
   );
 }
 
-export default function App({ appBackend = backend }: { appBackend?: Backend }) {
+export default function App({ appBackend = backend, windowActions = desktopWindowActions }: { appBackend?: Backend; windowActions?: WindowActions }) {
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [settings, setSettings] = useState<AppSettings>(DEFAULT_SETTINGS);
   const [summary, setSummary] = useState<QueueSummary>(() => summarizeJobs([]));
@@ -173,9 +169,18 @@ export default function App({ appBackend = backend }: { appBackend?: Backend }) 
 
   return (
     <main className="app-shell" onDragEnter={(event) => { event.preventDefault(); setDropActive(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (event.currentTarget === event.target) setDropActive(false); }} onDrop={(event) => { event.preventDefault(); setDropActive(false); if (event.dataTransfer.files.length) void addPaths([...event.dataTransfer.files].map((file) => file.name)); }}>
-      <header className="app-header"><div className="brand"><span className="brand-mark"><DocumentImage20Regular /></span><div><strong>PicoPic</strong><span>本地图片压缩</span></div></div><button className="icon-button" aria-label="更多选项"><MoreHorizontal20Regular /></button></header>
+      <header className="app-header">
+        <div className="title-drag-region" data-tauri-drag-region>
+          <div className="brand" data-tauri-drag-region><span className="brand-mark"><DocumentImage20Regular /></span><div data-tauri-drag-region><strong data-tauri-drag-region>PicoPic</strong><span data-tauri-drag-region>本地图片压缩</span></div></div>
+        </div>
+        <div className="window-controls" aria-label="窗口控制">
+          <button type="button" className="window-control" aria-label="最小化" title="最小化" onClick={() => void windowActions.minimize()}><span className="minimize-glyph" /></button>
+          <button type="button" className="window-control" aria-label="最大化或还原" title="最大化或还原" onClick={() => void windowActions.toggleMaximize()}><span className="maximize-glyph" /></button>
+          <button type="button" className="window-control close-window" aria-label="关闭" title="关闭" onClick={() => void windowActions.close()}><span className="close-glyph" /></button>
+        </div>
+      </header>
       <section className="workspace">
-        {jobs.length === 0 ? <DropEmpty active={dropActive} onAddFiles={() => void pick("files")} onAddFolder={() => void pick("folder")} /> : <JobTable jobs={jobs} selected={selected} onToggle={toggle} />}
+        {jobs.length === 0 ? <DropEmpty active={dropActive} /> : <JobTable jobs={jobs} selected={selected} onToggle={toggle} />}
         {notice && <div className="notice" role="status">{notice}</div>}
       </section>
       <footer className="command-bar">
