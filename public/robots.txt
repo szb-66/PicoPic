@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://szb-66.github.io/PicoPic/sitemap.xml

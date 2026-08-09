@@ -1,0 +1,14 @@
+{
+  "name": "PicoPic — 本地图片压缩",
+  "short_name": "PicoPic",
+  "description": "离线、安全的 Windows 图片压缩工具",
+  "lang": "zh-CN",
+  "start_url": "./",
+  "display": "standalone",
+  "background_color": "#f8f9fc",
+  "theme_color": "#1666e8",
+  "icons": [
+    { "src": "picopic-icon.png", "sizes": "any", "type": "image/png", "purpose": "any" },
+    { "src": "picopic-icon.png", "sizes": "any", "type": "image/png", "purpose": "maskable" }
+  ]
+}

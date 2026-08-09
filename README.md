@@ -3,6 +3,8 @@
   <h1>PicoPic</h1>
   <p>轻巧、离线、安全的 Windows 图片压缩工具</p>
   <p>
+    <a href="https://szb-66.github.io/PicoPic/">官方网站</a>
+    ·
     <a href="https://github.com/szb-66/PicoPic/releases/latest">下载最新版</a>
     ·
     <a href="https://github.com/szb-66/PicoPic/issues">反馈问题</a>

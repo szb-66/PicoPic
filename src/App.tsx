@@ -171,7 +171,7 @@ export default function App({ appBackend = backend, windowActions = desktopWindo
     <main className="app-shell" onDragEnter={(event) => { event.preventDefault(); setDropActive(true); }} onDragOver={(event) => event.preventDefault()} onDragLeave={(event) => { if (event.currentTarget === event.target) setDropActive(false); }} onDrop={(event) => { event.preventDefault(); setDropActive(false); if (event.dataTransfer.files.length) void addPaths([...event.dataTransfer.files].map((file) => file.name)); }}>
       <header className="app-header">
         <div className="title-drag-region" data-tauri-drag-region>
-          <div className="brand" data-tauri-drag-region><span className="brand-mark"><DocumentImage20Regular /></span><div data-tauri-drag-region><strong data-tauri-drag-region>PicoPic</strong><span data-tauri-drag-region>本地图片压缩</span></div></div>
+          <div className="brand" data-tauri-drag-region><span className="brand-mark"><img src="./picopic-icon.png" alt="" /></span><div data-tauri-drag-region><strong data-tauri-drag-region>PicoPic</strong><span data-tauri-drag-region>本地图片压缩</span></div></div>
         </div>
         <div className="window-controls" aria-label="窗口控制">
           <button type="button" className="window-control" aria-label="最小化" title="最小化" onClick={() => void windowActions.minimize()}><span className="minimize-glyph" /></button>
