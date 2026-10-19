@@ -670,6 +670,13 @@ fn encoded_bytes(
             }
         }
     };
+    // Unusual or malformed EXIF must not bypass normalization and cause
+    // consumers to rotate already-transformed pixels again.
+    if orientation(&output) != 1 {
+        return Err(OptimizeError::Validation(
+            "无法安全规范化输出 EXIF 方向，原文件未改变".into(),
+        ));
+    }
     Ok((output, dimensions))
 }
 
@@ -1047,6 +1054,22 @@ mod tests {
             let (output, _) = encoded_bytes(&source, format, &settings).unwrap();
             assert_eq!(orientation(&output), 6);
         }
+    }
+
+    #[test]
+    fn nonstandard_orientation_count_cannot_bypass_output_validation() {
+        let mut tiff = tiff_orientation(6, true);
+        tiff[14..18].copy_from_slice(&2_u32.to_le_bytes());
+        let source = png_with_chunk(&source_bytes(ImageFormat::Png), b"eXIf", &tiff);
+        assert_eq!(orientation(&source), 6);
+        let settings = AppSettings {
+            strip_metadata: false,
+            ..AppSettings::default()
+        };
+        assert!(matches!(
+            encoded_bytes(&source, ImageFormat::Png, &settings),
+            Err(OptimizeError::Validation(_))
+        ));
     }
 
     #[test]
