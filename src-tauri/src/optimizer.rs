@@ -1,12 +1,12 @@
 use crate::{
     models::{AppSettings, ImageFormat, OptimizationLevel},
-    scanner::detect_format,
+    scanner::{detect_format, MAX_SOURCE_BYTES},
 };
 use filetime::{set_file_times, FileTime};
 use image::{DynamicImage, GenericImageView};
 use std::{
     fs,
-    io::{Cursor, Write},
+    io::{Cursor, Read, Write},
     path::Path,
     sync::{
         atomic::{AtomicU8, Ordering},
@@ -117,9 +117,9 @@ fn decode_oriented(bytes: &[u8]) -> Result<DynamicImage, OptimizeError> {
         2 => image.fliph(),
         3 => image.rotate180(),
         4 => image.flipv(),
-        5 => image.fliph().rotate90(),
+        5 => image.fliph().rotate270(),
         6 => image.rotate90(),
-        7 => image.fliph().rotate270(),
+        7 => image.fliph().rotate90(),
         8 => image.rotate270(),
         _ => image,
     })
@@ -259,7 +259,67 @@ fn encode_webp(
         .map_err(|error| OptimizeError::Encode(format!("{error:?}")))
 }
 
-fn jpeg_metadata_segments(bytes: &[u8], drop_oriented_exif: bool) -> Vec<u8> {
+// Rotation is applied to pixels before lossy encoding. Reset only the IFD0
+// orientation value so preserved EXIF cannot rotate them a second time.
+fn normalized_exif(payload: &[u8]) -> Vec<u8> {
+    let mut output = payload.to_vec();
+    let base = if output.starts_with(b"Exif\0\0") {
+        6
+    } else {
+        0
+    };
+    let Some(tiff) = output.get(base..) else {
+        return output;
+    };
+    let little = match tiff.get(..2) {
+        Some(b"II") => true,
+        Some(b"MM") => false,
+        _ => return output,
+    };
+    let read_u16 = |bytes: &[u8]| {
+        let pair = [bytes[0], bytes[1]];
+        if little {
+            u16::from_le_bytes(pair)
+        } else {
+            u16::from_be_bytes(pair)
+        }
+    };
+    let Some(offset_bytes) = tiff.get(4..8) else {
+        return output;
+    };
+    let offset_bytes: [u8; 4] = offset_bytes.try_into().unwrap();
+    let offset = if little {
+        u32::from_le_bytes(offset_bytes)
+    } else {
+        u32::from_be_bytes(offset_bytes)
+    } as usize;
+    let Some(count_bytes) = tiff.get(offset..offset.saturating_add(2)) else {
+        return output;
+    };
+    let count = read_u16(count_bytes) as usize;
+    for index in 0..count {
+        let Some(start) = offset
+            .checked_add(2)
+            .and_then(|v| v.checked_add(index * 12))
+        else {
+            break;
+        };
+        let Some(entry) = output.get(base + start..base + start + 12) else {
+            break;
+        };
+        let count_one = if little { [1, 0, 0, 0] } else { [0, 0, 0, 1] };
+        if read_u16(&entry[..2]) == 0x0112
+            && read_u16(&entry[2..4]) == 3
+            && entry[4..8] == count_one
+        {
+            let one = if little { [1, 0] } else { [0, 1] };
+            output[base + start + 8..base + start + 10].copy_from_slice(&one);
+        }
+    }
+    output
+}
+
+fn jpeg_metadata_segments(bytes: &[u8], normalize_orientation: bool) -> Vec<u8> {
     if bytes.len() < 4 || !bytes.starts_with(&[0xFF, 0xD8]) {
         return Vec::new();
     }
@@ -277,19 +337,24 @@ fn jpeg_metadata_segments(bytes: &[u8], drop_oriented_exif: bool) -> Vec<u8> {
         let end = offset + 2 + length;
         let is_metadata = (0xE1..=0xEF).contains(&marker) || marker == 0xFE;
         let is_exif = marker == 0xE1 && bytes[offset + 4..end].starts_with(b"Exif\0\0");
-        if is_metadata && !(drop_oriented_exif && is_exif) {
-            metadata.extend_from_slice(&bytes[offset..end]);
+        if is_metadata {
+            if normalize_orientation && is_exif {
+                metadata.extend_from_slice(&bytes[offset..offset + 4]);
+                metadata.extend_from_slice(&normalized_exif(&bytes[offset + 4..end]));
+            } else {
+                metadata.extend_from_slice(&bytes[offset..end]);
+            }
         }
         offset = end;
     }
     metadata
 }
 
-fn preserve_jpeg_metadata(encoded: &[u8], source: &[u8], drop_oriented_exif: bool) -> Vec<u8> {
+fn preserve_jpeg_metadata(encoded: &[u8], source: &[u8], normalize_orientation: bool) -> Vec<u8> {
     if !encoded.starts_with(&[0xFF, 0xD8]) {
         return encoded.to_vec();
     }
-    let metadata = jpeg_metadata_segments(source, drop_oriented_exif);
+    let metadata = jpeg_metadata_segments(source, normalize_orientation);
     if metadata.is_empty() {
         return encoded.to_vec();
     }
@@ -351,7 +416,18 @@ fn preserve_png_metadata(encoded: &[u8], source: &[u8]) -> Vec<u8> {
         output.extend_from_slice(chunk);
         if kind == b"IHDR" {
             for metadata_chunk in &metadata {
-                output.extend_from_slice(metadata_chunk);
+                if &metadata_chunk[4..8] == b"eXIf" && orientation(source) != 1 {
+                    let payload = normalized_exif(&metadata_chunk[8..metadata_chunk.len() - 4]);
+                    output.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+                    output.extend_from_slice(b"eXIf");
+                    output.extend_from_slice(&payload);
+                    let mut crc = crc32fast::Hasher::new();
+                    crc.update(b"eXIf");
+                    crc.update(&payload);
+                    output.extend_from_slice(&crc.finalize().to_be_bytes());
+                } else {
+                    output.extend_from_slice(metadata_chunk);
+                }
             }
         }
     }
@@ -389,6 +465,7 @@ fn preserve_webp_metadata(
     source: &[u8],
     dimensions: (u32, u32),
     has_alpha: bool,
+    normalize_orientation: bool,
 ) -> Vec<u8> {
     let Some(source_chunks) = webp_chunks(source) else {
         return encoded.to_vec();
@@ -432,8 +509,17 @@ fn preserve_webp_metadata(
             output.extend_from_slice(chunk);
         }
     }
-    for (_, chunk) in metadata {
-        output.extend_from_slice(chunk);
+    for (kind, chunk) in metadata {
+        if kind == b"EXIF" && normalize_orientation {
+            let size = u32::from_le_bytes(chunk[4..8].try_into().unwrap()) as usize;
+            output.extend_from_slice(&chunk[..8]);
+            output.extend_from_slice(&normalized_exif(&chunk[8..8 + size]));
+            if size % 2 == 1 {
+                output.push(0);
+            }
+        } else {
+            output.extend_from_slice(chunk);
+        }
     }
     let riff_size = (output.len() - 8) as u32;
     output[4..8].copy_from_slice(&riff_size.to_le_bytes());
@@ -502,6 +588,11 @@ fn encoded_bytes(
 ) -> Result<(Vec<u8>, (u32, u32)), OptimizeError> {
     let format_settings = settings.format(format);
     if !format_settings.lossy {
+        if settings.strip_metadata && orientation(source) != 1 {
+            return Err(OptimizeError::Validation(
+                "图片依赖 EXIF 方向；请保留元数据或启用有损模式，原文件未改变".into(),
+            ));
+        }
         let original = image::load_from_memory(source)
             .map_err(|error| OptimizeError::Decode(error.to_string()))?;
         let dimensions = original.dimensions();
@@ -533,7 +624,7 @@ fn encoded_bytes(
                         if settings.strip_metadata {
                             encoded
                         } else {
-                            preserve_webp_metadata(&encoded, source, dimensions, has_alpha)
+                            preserve_webp_metadata(&encoded, source, dimensions, has_alpha, false)
                         }
                     } else if settings.strip_metadata {
                         strip_webp_metadata(source)
@@ -575,7 +666,7 @@ fn encoded_bytes(
             if settings.strip_metadata {
                 encoded
             } else {
-                preserve_webp_metadata(&encoded, source, dimensions, has_alpha)
+                preserve_webp_metadata(&encoded, source, dimensions, has_alpha, true)
             }
         }
     };
@@ -647,6 +738,38 @@ fn validate_temporary_output(
     Ok(result_bytes)
 }
 
+// On Windows deny in-place writers while encoding, but permit ReplaceFileW.
+// Another process may still rename/replace the path; recheck it before commit.
+fn open_source(path: &Path) -> Result<fs::File, OptimizeError> {
+    let mut options = fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_SHARE_DELETE, FILE_SHARE_READ};
+        options.share_mode(FILE_SHARE_READ | FILE_SHARE_DELETE);
+    }
+    options.open(path).map_err(OptimizeError::Read)
+}
+
+fn verify_source_unchanged(
+    path: &Path,
+    original: &[u8],
+    metadata: &fs::Metadata,
+) -> Result<(), OptimizeError> {
+    let current = fs::metadata(path)?;
+    if current.len() != original.len() as u64
+        || current.modified()? != metadata.modified()?
+        || current.permissions().readonly()
+        || fs::read(path)? != original
+    {
+        return Err(OptimizeError::Replace(
+            "源文件在处理期间发生变化，已保留当前文件".into(),
+        ));
+    }
+    Ok(())
+}
+
 pub fn optimize_file(
     path: &Path,
     format: ImageFormat,
@@ -656,8 +779,20 @@ pub fn optimize_file(
     if cancellation.is_cancelled() {
         return Err(OptimizeError::Cancelled);
     }
-    let source = fs::read(path)?;
-    let metadata = fs::metadata(path)?;
+    let mut source_handle = open_source(path)?;
+    let metadata = source_handle.metadata()?;
+    let mut source = Vec::new();
+    if metadata.len() > MAX_SOURCE_BYTES {
+        return Err(OptimizeError::Validation(
+            "图片超过 128 MiB 的安全处理上限".into(),
+        ));
+    }
+    (&mut source_handle)
+        .take(MAX_SOURCE_BYTES + 1)
+        .read_to_end(&mut source)?;
+    if detect_format(path, &source).map_err(OptimizeError::Validation)? != format {
+        return Err(OptimizeError::Validation("源文件格式发生变化".into()));
+    }
     if metadata.permissions().readonly() {
         return Err(OptimizeError::Replace("源文件为只读".into()));
     }
@@ -688,6 +823,7 @@ pub fn optimize_file(
         original_bytes,
         expected_dimensions,
     )?;
+    verify_source_unchanged(path, &source, &metadata)?;
     fs::set_permissions(temporary.path(), permissions)?;
     if settings.preserve_timestamps {
         set_file_times(temporary.path(), accessed, modified)?;
@@ -695,6 +831,7 @@ pub fn optimize_file(
     if cancellation.is_cancelled() {
         return Err(OptimizeError::Cancelled);
     }
+    verify_source_unchanged(path, &source, &metadata)?;
     let (_, temporary_path) = temporary
         .keep()
         .map_err(|error| OptimizeError::Read(error.error))?;
@@ -704,6 +841,7 @@ pub fn optimize_file(
     }
     let replacement_result = atomic_replace(path, &temporary_path);
     cancellation.finish_commit();
+    drop(source_handle);
     if let Err(error) = replacement_result {
         let _ = fs::remove_file(&temporary_path);
         return Err(error);
@@ -793,6 +931,146 @@ mod tests {
                 bytes
             }
         }
+    }
+
+    fn tiff_orientation(value: u8, little: bool) -> Vec<u8> {
+        if little {
+            vec![
+                b'I', b'I', 42, 0, 8, 0, 0, 0, 1, 0, 0x12, 1, 3, 0, 1, 0, 0, 0, value, 0, 0, 0, 0,
+                0, 0, 0,
+            ]
+        } else {
+            vec![
+                b'M', b'M', 0, 42, 0, 0, 0, 8, 0, 1, 1, 0x12, 0, 3, 0, 0, 0, 1, 0, value, 0, 0, 0,
+                0, 0, 0,
+            ]
+        }
+    }
+
+    fn with_orientation(format: ImageFormat, value: u8, little: bool) -> Vec<u8> {
+        let base = source_bytes(format);
+        let tiff = tiff_orientation(value, little);
+        match format {
+            ImageFormat::Jpeg => {
+                let payload = [b"Exif\0\0".as_slice(), &tiff].concat();
+                let mut out = vec![0xFF, 0xD8, 0xFF, 0xE1];
+                out.extend_from_slice(&((payload.len() + 2) as u16).to_be_bytes());
+                out.extend_from_slice(&payload);
+                out.extend_from_slice(&base[2..]);
+                out
+            }
+            ImageFormat::Png => png_with_chunk(&base, b"eXIf", &tiff),
+            ImageFormat::Webp => {
+                let rgba = sample_rgba();
+                let encoded = webp::Encoder::from_rgba(rgba.as_raw(), rgba.width(), rgba.height())
+                    .encode_lossless()
+                    .to_vec();
+                let mut metadata = b"RIFF\0\0\0\0WEBP".to_vec();
+                metadata.extend_from_slice(b"EXIF");
+                metadata.extend_from_slice(&(tiff.len() as u32).to_le_bytes());
+                metadata.extend_from_slice(&tiff);
+                let size = (metadata.len() - 8) as u32;
+                metadata[4..8].copy_from_slice(&size.to_le_bytes());
+                preserve_webp_metadata(&encoded, &metadata, (320, 240), true, false)
+            }
+        }
+    }
+
+    #[test]
+    fn all_orientations_are_reset_after_lossy_encoding_in_every_format() {
+        for format in [ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::Webp] {
+            for little in [true, false] {
+                for value in 2..=8 {
+                    let source = with_orientation(format, value, little);
+                    assert_eq!(orientation(&source), value as u32);
+                    let settings = AppSettings {
+                        strip_metadata: false,
+                        ..AppSettings::default()
+                    };
+                    let (output, dimensions) = encoded_bytes(&source, format, &settings).unwrap();
+                    assert_eq!(orientation(&output), 1, "{format:?}, {value}, {little}");
+                    assert_eq!(dimensions, if value >= 5 { (240, 320) } else { (320, 240) });
+                    assert_eq!(decode_oriented(&output).unwrap().dimensions(), dimensions);
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn diagonal_orientations_match_transpose_and_transverse() {
+        let source = with_orientation(ImageFormat::Png, 5, true);
+        let raw = image::load_from_memory(&source).unwrap().to_rgba8();
+        let transposed = decode_oriented(&source).unwrap().to_rgba8();
+        for (x, y, pixel) in raw.enumerate_pixels() {
+            assert_eq!(transposed.get_pixel(y, x), pixel);
+        }
+        let transverse = decode_oriented(&with_orientation(ImageFormat::Png, 7, true))
+            .unwrap()
+            .to_rgba8();
+        for (x, y, pixel) in raw.enumerate_pixels() {
+            assert_eq!(
+                transverse.get_pixel(raw.height() - 1 - y, raw.width() - 1 - x),
+                pixel
+            );
+        }
+    }
+
+    #[test]
+    fn lossless_metadata_removal_refuses_to_lose_orientation() {
+        for format in [ImageFormat::Jpeg, ImageFormat::Png, ImageFormat::Webp] {
+            let mut settings = AppSettings::default();
+            settings.jpeg.lossy = false;
+            settings.png.lossy = false;
+            settings.webp.lossy = false;
+            let source = with_orientation(format, 6, true);
+            assert!(matches!(
+                encoded_bytes(&source, format, &settings),
+                Err(OptimizeError::Validation(_))
+            ));
+            settings.strip_metadata = false;
+            let (output, _) = encoded_bytes(&source, format, &settings).unwrap();
+            assert_eq!(orientation(&output), 6);
+        }
+    }
+
+    #[test]
+    fn malformed_exif_is_left_intact_without_panics() {
+        for bytes in [
+            vec![],
+            b"Exif\0\0II".to_vec(),
+            vec![255; 100],
+            b"II*\0\xff\xff\xff\xff".to_vec(),
+        ] {
+            assert_eq!(normalized_exif(&bytes), bytes);
+        }
+    }
+
+    #[test]
+    fn source_guard_detects_same_size_edits_even_with_restored_timestamp() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.png");
+        fs::write(&path, b"original").unwrap();
+        let metadata = fs::metadata(&path).unwrap();
+        verify_source_unchanged(&path, b"original", &metadata).unwrap();
+        fs::write(&path, b"modified").unwrap();
+        filetime::set_file_mtime(&path, FileTime::from_last_modification_time(&metadata)).unwrap();
+        assert!(matches!(
+            verify_source_unchanged(&path, b"original", &metadata),
+            Err(OptimizeError::Replace(_))
+        ));
+        assert_eq!(fs::read(&path).unwrap(), b"modified");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn source_handle_blocks_in_place_writers() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("source.png");
+        fs::write(&path, b"original").unwrap();
+        let handle = open_source(&path).unwrap();
+        assert!(fs::OpenOptions::new().write(true).open(&path).is_err());
+        drop(handle);
+        assert!(fs::OpenOptions::new().write(true).open(&path).is_ok());
     }
 
     #[test]

@@ -2,9 +2,13 @@ use crate::models::{ImageFormat, ScanWarning};
 use std::{
     collections::HashSet,
     fs,
+    io::Cursor,
     path::{Path, PathBuf},
 };
 use walkdir::{DirEntry, WalkDir};
+
+pub const MAX_SOURCE_BYTES: u64 = 128 * 1024 * 1024;
+const MAX_PIXELS: u64 = 40_000_000;
 
 #[derive(Debug, Clone)]
 pub struct ScanCandidate {
@@ -89,6 +93,9 @@ fn webp_is_animated(bytes: &[u8]) -> bool {
 }
 
 pub fn detect_format(path: &Path, bytes: &[u8]) -> Result<ImageFormat, String> {
+    if bytes.len() as u64 > MAX_SOURCE_BYTES {
+        return Err("图片超过 128 MiB 的安全处理上限".into());
+    }
     let expected = extension_format(path).ok_or_else(|| "不支持的图片类型".to_string())?;
     let detected = if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
         Some(ImageFormat::Jpeg)
@@ -108,15 +115,19 @@ pub fn detect_format(path: &Path, bytes: &[u8]) -> Result<ImageFormat, String> {
     if expected == ImageFormat::Webp && webp_is_animated(bytes) {
         return Err("暂不支持动画 WebP".into());
     }
-    image::load_from_memory_with_format(
-        bytes,
-        match expected {
-            ImageFormat::Jpeg => image::ImageFormat::Jpeg,
-            ImageFormat::Png => image::ImageFormat::Png,
-            ImageFormat::Webp => image::ImageFormat::WebP,
-        },
-    )
-    .map_err(|_| "图片数据损坏或无法解码".to_string())?;
+    let image_format = match expected {
+        ImageFormat::Jpeg => image::ImageFormat::Jpeg,
+        ImageFormat::Png => image::ImageFormat::Png,
+        ImageFormat::Webp => image::ImageFormat::WebP,
+    };
+    let (width, height) = image::ImageReader::with_format(Cursor::new(bytes), image_format)
+        .into_dimensions()
+        .map_err(|_| "图片数据损坏或无法解码".to_string())?;
+    if u64::from(width) * u64::from(height) > MAX_PIXELS {
+        return Err("图片超过 4000 万像素的安全处理上限".into());
+    }
+    image::load_from_memory_with_format(bytes, image_format)
+        .map_err(|_| "图片数据损坏或无法解码".to_string())?;
     Ok(expected)
 }
 
@@ -147,6 +158,14 @@ fn inspect_file(path: PathBuf) -> Option<ScanCandidate> {
             })
         }
     };
+    if metadata.len() > MAX_SOURCE_BYTES {
+        return Some(ScanCandidate {
+            path,
+            format: None,
+            skip_reason: Some("图片超过 128 MiB 的安全处理上限".into()),
+            original_bytes: metadata.len(),
+        });
+    }
     let bytes = match fs::read(&path) {
         Ok(value) => value,
         Err(error) => {
@@ -294,6 +313,19 @@ mod tests {
             writer.write_image_data(&[255; 16]).unwrap();
         }
         bytes
+    }
+
+    #[test]
+    fn rejects_oversized_files_before_reading_them() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("huge.png");
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_SOURCE_BYTES + 1)
+            .unwrap();
+        let (found, _) = scan_paths(&[path.display().to_string()], false);
+        assert_eq!(found.len(), 1);
+        assert!(found[0].skip_reason.as_ref().unwrap().contains("128 MiB"));
     }
 
     #[test]
