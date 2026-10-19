@@ -112,7 +112,6 @@ fn spawn_job(
         id: id.clone(),
     };
     tauri::async_runtime::spawn(async move {
-        let reservation = reservation;
         let permit = match state.semaphore.clone().acquire_owned().await {
             Ok(value) => value,
             Err(_) => return,

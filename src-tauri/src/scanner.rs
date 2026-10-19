@@ -2,7 +2,7 @@ use crate::models::{ImageFormat, ScanWarning};
 use std::{
     collections::HashSet,
     fs,
-    io::Cursor,
+    io::{Cursor, Read},
     path::{Path, PathBuf},
 };
 use walkdir::{DirEntry, WalkDir};
@@ -166,7 +166,11 @@ fn inspect_file(path: PathBuf) -> Option<ScanCandidate> {
             original_bytes: metadata.len(),
         });
     }
-    let bytes = match fs::read(&path) {
+    let bytes = match fs::File::open(&path).and_then(|file| {
+        let mut bytes = Vec::new();
+        file.take(MAX_SOURCE_BYTES + 1).read_to_end(&mut bytes)?;
+        Ok(bytes)
+    }) {
         Ok(value) => value,
         Err(error) => {
             return Some(ScanCandidate {
@@ -326,6 +330,19 @@ mod tests {
         let (found, _) = scan_paths(&[path.display().to_string()], false);
         assert_eq!(found.len(), 1);
         assert!(found[0].skip_reason.as_ref().unwrap().contains("128 MiB"));
+    }
+
+    #[test]
+    fn rejects_excessive_pixel_dimensions_before_full_decode() {
+        let mut bytes = valid_png();
+        bytes[16..20].copy_from_slice(&100_000_u32.to_be_bytes());
+        bytes[20..24].copy_from_slice(&100_000_u32.to_be_bytes());
+        let mut crc = crc32fast::Hasher::new();
+        crc.update(&bytes[12..29]);
+        bytes[29..33].copy_from_slice(&crc.finalize().to_be_bytes());
+        assert!(detect_format(Path::new("huge.png"), &bytes)
+            .unwrap_err()
+            .contains("4000 万"));
     }
 
     #[test]

@@ -758,11 +758,27 @@ fn verify_source_unchanged(
     metadata: &fs::Metadata,
 ) -> Result<(), OptimizeError> {
     let current = fs::metadata(path)?;
-    if current.len() != original.len() as u64
+    let metadata_changed = current.len() != original.len() as u64
         || current.modified()? != metadata.modified()?
-        || current.permissions().readonly()
-        || fs::read(path)? != original
-    {
+        || current.permissions().readonly();
+    let mut file = fs::File::open(path)?;
+    let mut offset = 0;
+    let mut buffer = [0_u8; 64 * 1024];
+    let mut content_changed = false;
+    if !metadata_changed {
+        loop {
+            let count = file.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            if original.get(offset..offset + count) != Some(&buffer[..count]) {
+                content_changed = true;
+                break;
+            }
+            offset += count;
+        }
+    }
+    if metadata_changed || content_changed || offset != original.len() {
         return Err(OptimizeError::Replace(
             "源文件在处理期间发生变化，已保留当前文件".into(),
         ));
